@@ -176,6 +176,7 @@ class _CatalogProvider:
     id = f"test-catalog"
     base_url = f""
     is_local = False
+    is_custom = False
     resolve_model_info = Provider.resolve_model_info
 
     get_context_size = Provider.get_context_size
@@ -243,6 +244,66 @@ def test_unrelated_model_config_update_keeps_catalog_window():
     assert model.max_input_length_configured is False
     p._info = model
     assert p.get_context_size(model.id) == 200_000
+
+
+# -- local custom endpoints must not inherit cloud catalog windows -----------
+#
+# A user-created provider pointed at a loopback address serves whatever the
+# user loaded locally (llama.cpp ``-c 32768``, vLLM, ...). The static catalog
+# only describes cloud windows, so a catalog match there inflates the window
+# and stops compaction from ever firing before the server rejects the prompt.
+
+
+def test_local_custom_provider_ignores_cloud_catalog():
+    p = _CatalogProvider()
+    p.is_custom = True
+    p.base_url = "http://127.0.0.1:8080/v1"
+    p._info = ModelInfo(id="qwen3.8-27b", name="x")
+
+    assert p.get_context_size("qwen3.8-27b") == DEFAULT_CONTEXT_WINDOW
+
+
+def test_local_custom_provider_honors_explicit_user_config():
+    p = _CatalogProvider()
+    p.is_custom = True
+    p.base_url = "http://127.0.0.1:8080/v1"
+    p._info = ModelInfo(
+        id="qwen3.8-27b",
+        name="x",
+        max_input_length=32_768,
+        max_input_length_configured=True,
+    )
+
+    assert p.get_context_size("qwen3.8-27b") == 32_768
+
+
+def test_remote_custom_provider_keeps_cloud_catalog():
+    """A genuinely remote custom endpoint still gets the catalog window."""
+    p = _CatalogProvider()
+    p.is_custom = True
+    p.base_url = "https://gateway.example.com/v1"
+    p._info = ModelInfo(id="qwen3.8-27b", name="x")
+
+    assert p.get_context_size("qwen3.8-27b") == 1_000_000
+
+
+def test_builtin_local_provider_keeps_ignoring_catalog():
+    """is_local already opts out; this must not regress."""
+    p = _CatalogProvider()
+    p.is_local = True
+    p._info = ModelInfo(id="qwen3.8-27b", name="x")
+
+    assert p.get_context_size("qwen3.8-27b") == DEFAULT_CONTEXT_WINDOW
+
+
+def test_builtin_cloud_provider_keeps_cloud_catalog():
+    """A shipped cloud provider is untouched by the local rule."""
+    p = _CatalogProvider()
+    p.is_custom = False
+    p.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    p._info = ModelInfo(id="qwen3.8-27b", name="x")
+
+    assert p.get_context_size("qwen3.8-27b") == 1_000_000
 
 
 def test_context_size_default_when_unknown_everywhere():

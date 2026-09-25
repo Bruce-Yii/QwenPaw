@@ -12,6 +12,7 @@ from .model_billing import effective_billing
 from .model_info import ModelInfo
 from .model_metadata import model_metadata
 from .model_ranking import model_ranking
+from ..utils.http import is_loopback_url
 
 if TYPE_CHECKING:
     from .provider import Provider
@@ -26,7 +27,16 @@ def resolve_model_info(
 ) -> ModelInfo:
     """Enrich a copy; automatic values never become persisted overrides."""
     result = ModelInfo.model_validate(model.model_dump())
-    local = provider.is_local or not provider._context_catalog_enabled()
+    # A user-created provider aimed at a loopback address serves whatever the
+    # user loaded on their own machine (llama.cpp ``-c 32768``, vLLM, ...), so
+    # a cloud catalog match says nothing about the real window -- the same
+    # reason Ollama opts out. Remote custom endpoints keep the catalog, and
+    # mistaking one for local only lowers the window, which is the safe
+    # direction.
+    local = provider.is_local or (
+        not provider._context_catalog_enabled()
+        or (provider.is_custom and is_loopback_url(provider.base_url))
+    )
     matches = (
         []
         if local
