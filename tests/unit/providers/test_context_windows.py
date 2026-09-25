@@ -246,15 +246,16 @@ def test_unrelated_model_config_update_keeps_catalog_window():
     assert p.get_context_size(model.id) == 200_000
 
 
-# -- local custom endpoints must not inherit cloud catalog windows -----------
+# -- custom endpoints must not inherit cloud catalog windows -----------------
 #
-# A user-created provider pointed at a loopback address serves whatever the
-# user loaded locally (llama.cpp ``-c 32768``, vLLM, ...). The static catalog
-# only describes cloud windows, so a catalog match there inflates the window
-# and stops compaction from ever firing before the server rejects the prompt.
+# The static catalog only records cloud windows and matches on a model-alias
+# substring, with no provider or endpoint gating. For a user-created provider
+# the alias is chosen locally -- an llama.cpp alias like "qwen3.8-27b" matches
+# the cloud "qwen3.8" entry -- so the inferred window can be far larger than
+# what the server accepts, and compaction then never fires.
 
 
-def test_local_custom_provider_ignores_cloud_catalog():
+def test_custom_provider_ignores_cloud_catalog():
     p = _CatalogProvider()
     p.is_custom = True
     p.base_url = "http://127.0.0.1:8080/v1"
@@ -263,10 +264,20 @@ def test_local_custom_provider_ignores_cloud_catalog():
     assert p.get_context_size("qwen3.8-27b") == DEFAULT_CONTEXT_WINDOW
 
 
-def test_local_custom_provider_honors_explicit_user_config():
+def test_custom_provider_on_lan_ignores_cloud_catalog():
+    """A self-hosted server reached over the LAN is the same situation."""
     p = _CatalogProvider()
     p.is_custom = True
-    p.base_url = "http://127.0.0.1:8080/v1"
+    p.base_url = "http://192.168.1.50:1234/v1"
+    p._info = ModelInfo(id="qwen3.8-27b", name="x")
+
+    assert p.get_context_size("qwen3.8-27b") == DEFAULT_CONTEXT_WINDOW
+
+
+def test_custom_provider_honors_explicit_user_config():
+    p = _CatalogProvider()
+    p.is_custom = True
+    p.base_url = "http://192.168.1.50:1234/v1"
     p._info = ModelInfo(
         id="qwen3.8-27b",
         name="x",
@@ -275,16 +286,6 @@ def test_local_custom_provider_honors_explicit_user_config():
     )
 
     assert p.get_context_size("qwen3.8-27b") == 32_768
-
-
-def test_remote_custom_provider_keeps_cloud_catalog():
-    """A genuinely remote custom endpoint still gets the catalog window."""
-    p = _CatalogProvider()
-    p.is_custom = True
-    p.base_url = "https://gateway.example.com/v1"
-    p._info = ModelInfo(id="qwen3.8-27b", name="x")
-
-    assert p.get_context_size("qwen3.8-27b") == 1_000_000
 
 
 def test_builtin_local_provider_keeps_ignoring_catalog():
@@ -297,13 +298,40 @@ def test_builtin_local_provider_keeps_ignoring_catalog():
 
 
 def test_builtin_cloud_provider_keeps_cloud_catalog():
-    """A shipped cloud provider is untouched by the local rule."""
+    """A shipped cloud provider is untouched: it is not user-created."""
     p = _CatalogProvider()
-    p.is_custom = False
     p.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     p._info = ModelInfo(id="qwen3.8-27b", name="x")
 
     assert p.get_context_size("qwen3.8-27b") == 1_000_000
+
+
+def test_remote_custom_gateway_falls_back_to_default():
+    """A user-created endpoint gets no pattern-table inference.
+
+    A custom provider can still pick up curated catalog limits by pointing at a
+    template (see ``test_model_metadata.py``); this covers the case where it
+    does not, so only the loose alias-substring table would have supplied a
+    value. An explicit ``max_input_length`` still takes precedence for anyone
+    who knows their real window.
+    """
+    p = _CatalogProvider()
+    p.is_custom = True
+    p.base_url = "https://gateway.example.com/v1"
+    p._info = ModelInfo(id="qwen3.8-27b", name="x")
+
+    assert p.get_context_size("qwen3.8-27b") == DEFAULT_CONTEXT_WINDOW
+
+
+def test_custom_provider_unknown_alias_still_defaults():
+    p = _CatalogProvider()
+    p.is_custom = True
+    p.base_url = "http://192.168.1.50:1234/v1"
+    p._info = ModelInfo(id="totally-unknown-model", name="x")
+
+    assert (
+        p.get_context_size("totally-unknown-model") == DEFAULT_CONTEXT_WINDOW
+    )
 
 
 def test_context_size_default_when_unknown_everywhere():
